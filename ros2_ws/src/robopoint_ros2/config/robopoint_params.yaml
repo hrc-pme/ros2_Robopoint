@@ -1,0 +1,8 @@
+robopoint_node:
+  ros__parameters:
+    controller_url: "http://localhost:21001"
+    moderate: false
+    temperature: 1.0
+    top_p: 0.7
+    max_output_tokens: 512
+    model_name: ""

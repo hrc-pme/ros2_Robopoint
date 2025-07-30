@@ -1,0 +1,6 @@
+[console_scripts]
+constants = robopoint_controller.constants:main
+controller_node = robopoint_controller.controller_node:main
+conversation = robopoint_controller.conversation:main
+utils = robopoint_controller.utils:main
+

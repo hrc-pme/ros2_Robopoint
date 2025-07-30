@@ -1,0 +1,10 @@
+# Request
+sensor_msgs/Image image
+string query_text
+string image_process_mode
+---
+# Response
+bool success
+string error_message
+SpatialAffordanceResponse affordance_response
+sensor_msgs/Image visualization

@@ -1,0 +1,6 @@
+string model
+string params
+---
+bool success
+string worker_address
+string error_message

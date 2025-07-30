@@ -1,0 +1,6 @@
+string worker_name
+bool check_heart_beat
+string worker_status
+---
+bool success
+string message

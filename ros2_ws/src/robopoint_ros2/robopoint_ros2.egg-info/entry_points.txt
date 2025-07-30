@@ -1,0 +1,4 @@
+[console_scripts]
+robopoint_client = robopoint_ros2.robopoint_client:main
+robopoint_node = robopoint_ros2.robopoint_node:main
+

@@ -1,0 +1,5 @@
+# Empty request
+---
+string model_names
+int32 speed
+int32 queue_length

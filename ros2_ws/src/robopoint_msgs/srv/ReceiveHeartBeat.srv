@@ -1,0 +1,4 @@
+string worker_name
+int32 queue_length
+---
+bool exists

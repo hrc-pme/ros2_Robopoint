@@ -1,0 +1,5 @@
+controller_node:
+  ros__parameters:
+    dispatch_method: "shortest_queue"
+    heartbeat_timeout: 30.0
+    status_publish_rate: 1.0
