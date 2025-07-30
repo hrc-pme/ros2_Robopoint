@@ -10,8 +10,11 @@ find_package(ament_cmake REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/GenerateRequest.msg"
+  "msg/GenerateResponse.msg"
   "msg/HeartBeat.msg"
   "msg/WorkerStatus.msg"
   "srv/RegisterWorker.srv"
@@ -20,7 +23,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/ListModels.srv"
   "srv/WorkerGenerateStream.srv"
   "srv/WorkerGetStatus.srv"
-  DEPENDENCIES std_msgs builtin_interfaces
+  DEPENDENCIES std_msgs builtin_interfaces sensor_msgs
 )
 
 if(BUILD_TESTING)

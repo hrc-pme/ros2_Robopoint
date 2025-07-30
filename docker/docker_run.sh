@@ -3,7 +3,7 @@
 CONTAINER_NAME=ros2_humble_docker
 IMAGE_NAME=ros2-humble-dockeruser
 WORKDIR=/workspace
-HOST_DIR=$HOME/ros2_docker
+HOST_DIR=$HOME/ros2_Robopoint
 HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN:-"your_token_here"}
 DISPLAY_TO_USE=${DISPLAY:-":0"}
 XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}

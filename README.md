@@ -40,6 +40,7 @@ cd ros2_ws
 Inside the container build all packages with `colcon` and source the environment:
 
 ```bash
+source /opt/ros/humble/setup.bash
 colcon build --merge-install
 source install/local_setup.bash
 ```
@@ -58,7 +59,7 @@ source install/local_setup.bash
    ros2 launch robopoint_worker model_worker.launch.py
    ```
 
-   You can override model settings by passing parameters, e.g. `model_path:=facebook/opt-350m`.
+   You can override model settings by passing parameters, e.g. `model_path:=wentao-yuan/robopoint-v1-vicuna-v1.5-13b`.
 
 3. **Client** – sends queries and publishes results:
 

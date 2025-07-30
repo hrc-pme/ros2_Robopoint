@@ -10,3 +10,11 @@ cyclone_dds.xml
 fastrtps.xml
 *.jpg
 *.log
+*.log.*
+# 忽略 Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/

@@ -24,12 +24,12 @@ from PIL import Image as PILImage
 
 # 自定義訊息類型 (需要在 package 中定義)
 from robopoint_msgs.msg import GenerateRequest, GenerateResponse, WorkerStatus
-from robopoint_msgs.srv import GetStatus, GenerateStream
+from robopoint_msgs.srv import WorkerGetStatus, WorkerGenerateStream
 
-from robopoint.model.builder import load_pretrained_model
-from robopoint.mm_utils import process_images, load_image_from_base64, tokenizer_image_token
-from robopoint.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from robopoint.utils import build_logger, server_error_msg
+from robopoint_worker.model.builder import load_pretrained_model
+from robopoint_worker.mm_utils import process_images, load_image_from_base64, tokenizer_image_token
+from robopoint_controller.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from robopoint_controller.utils import build_logger, server_error_msg
 
 
 class ROS2ModelWorker(Node):
@@ -123,7 +123,7 @@ class ROS2ModelWorker(Node):
         
         # 建立 services
         self.status_service = self.create_service(
-            GetStatus,
+            WorkerGetStatus,
             f'/model_worker_{self.worker_id}/get_status',
             self.get_status_callback,
             callback_group=self.callback_group
@@ -148,7 +148,7 @@ class ROS2ModelWorker(Node):
         # 發布註冊訊息
         status_msg = WorkerStatus()
         status_msg.worker_id = self.worker_id
-        status_msg.model_names = [self.model_name]
+        status_msg.model_names = self.model_name
         status_msg.queue_length = self.get_queue_length()
         status_msg.is_registration = True
         
@@ -158,7 +158,7 @@ class ROS2ModelWorker(Node):
         """發送心跳訊息"""
         status_msg = WorkerStatus()
         status_msg.worker_id = self.worker_id
-        status_msg.model_names = [self.model_name]
+        status_msg.model_names = self.model_name
         status_msg.queue_length = self.get_queue_length()
         status_msg.global_counter = self.global_counter
         status_msg.is_registration = False
@@ -180,7 +180,7 @@ class ROS2ModelWorker(Node):
     def get_status_callback(self, request, response):
         """處理狀態查詢服務"""
         response.worker_id = self.worker_id
-        response.model_names = [self.model_name]
+        response.model_names = self.model_name
         response.queue_length = self.get_queue_length()
         response.speed = 1.0
         return response

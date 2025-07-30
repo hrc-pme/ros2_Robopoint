@@ -459,7 +459,7 @@ def main(args=None):
     parser.add_argument("--dispatch-method", type=str, 
                        choices=["lottery", "shortest_queue"], 
                        default="shortest_queue")
-    parsed_args = parser.parse_args()
+    parsed_args, unknown = parser.parse_known_args()
     
     # Create and run the controller node
     controller_node = ControllerNode(parsed_args.dispatch_method)
