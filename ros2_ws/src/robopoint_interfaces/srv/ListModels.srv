@@ -1,0 +1,6 @@
+# ListModels.srv  
+# Service to get list of available models
+---
+bool success
+string[] models
+string message

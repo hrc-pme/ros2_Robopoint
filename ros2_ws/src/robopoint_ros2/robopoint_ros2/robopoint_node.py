@@ -3,21 +3,28 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import String, Empty
 from geometry_msgs.msg import Point, PointStamped
 from robopoint_interfaces.msg import SpatialAffordanceQuery, SpatialAffordanceResponse, AffordancePoint
-from robopoint_interfaces.srv import ProcessImage
+from robopoint_interfaces.srv import (
+    ProcessImage, 
+    RefreshAllWorkers, 
+    ListModels, 
+    GetWorkerAddress, 
+    WorkerGenerateStream
+)
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
 from PIL import Image as PILImage, ImageDraw
-import requests
 import json
 import hashlib
 import datetime
 import os
 import re
 import time
+import base64
+import io
 from robopoint_controller.conversation import (default_conversation, conv_templates, SeparatorStyle)
 from robopoint_controller.constants import LOGDIR
 from robopoint_controller.utils import (
@@ -33,25 +40,42 @@ class RoboPointNode(Node):
         self.logger = build_logger("robopoint_ros2", "robopoint_ros2.log")
         
         # Parameters
-        self.declare_parameter('controller_url', 'http://localhost:21001')
         self.declare_parameter('moderate', False)
         self.declare_parameter('temperature', 1.0)
         self.declare_parameter('top_p', 0.7)
         self.declare_parameter('max_output_tokens', 512)
         self.declare_parameter('model_name', '')
+        self.declare_parameter('service_timeout', 30.0)
         
-        self.controller_url = self.get_parameter('controller_url').value
         self.moderate = self.get_parameter('moderate').value
         self.temperature = self.get_parameter('temperature').value
         self.top_p = self.get_parameter('top_p').value
         self.max_output_tokens = self.get_parameter('max_output_tokens').value
         self.model_name = self.get_parameter('model_name').value
+        self.service_timeout = self.get_parameter('service_timeout').value
         
         # Initialize CV bridge
         self.bridge = CvBridge()
         
         # Initialize conversation state
         self.conversation_state = default_conversation.copy()
+        
+        # ROS2 Service Clients for controller communication
+        self.refresh_workers_client = self.create_client(
+            RefreshAllWorkers, 
+            'refresh_all_workers'
+        )
+        self.list_models_client = self.create_client(
+            ListModels, 
+            'list_models'
+        )
+        self.get_worker_client = self.create_client(
+            GetWorkerAddress, 
+            'get_worker_address'
+        )
+        
+        # Wait for controller services to be available
+        self.wait_for_controller_services()
         
         # Get available models
         self.models = self.get_model_list()
@@ -63,9 +87,6 @@ class RoboPointNode(Node):
             "vicuna-13b": "aaaaaaa",
             "koala-13b": "aaaaaab",
         }
-        
-        # Headers for HTTP requests
-        self.headers = {"User-Agent": "RoboPoint Client"}
         
         # Publishers
         self.affordance_pub = self.create_publisher(
@@ -106,25 +127,60 @@ class RoboPointNode(Node):
         self.latest_image = None
         self.latest_pil_image = None
         
+        # Cache for worker service clients
+        self.worker_clients = {}
+        
         self.get_logger().info(f'RoboPoint node initialized with models: {self.models}')
 
+    def wait_for_controller_services(self):
+        """Wait for controller services to become available"""
+        services_to_wait = [
+            (self.refresh_workers_client, 'refresh_all_workers'),
+            (self.list_models_client, 'list_models'),
+            (self.get_worker_client, 'get_worker_address')
+        ]
+        
+        for client, service_name in services_to_wait:
+            self.get_logger().info(f'Waiting for service: {service_name}')
+            if not client.wait_for_service(timeout_sec=10.0):
+                self.get_logger().warn(f'Service {service_name} not available after 10 seconds')
+            else:
+                self.get_logger().info(f'Service {service_name} is ready')
+
     def get_model_list(self):
-        """Get available models from controller"""
+        """Get available models from controller via ROS2 services"""
         try:
-            ret = requests.post(self.controller_url + "/refresh_all_workers")
-            if ret.status_code != 200:
-                self.get_logger().warn("Failed to refresh workers")
+            # Refresh all workers first
+            refresh_request = RefreshAllWorkers.Request()
+            refresh_future = self.refresh_workers_client.call_async(refresh_request)
+            
+            rclpy.spin_until_future_complete(self, refresh_future, timeout_sec=5.0)
+            
+            if refresh_future.result() is None:
+                self.get_logger().warn("Failed to refresh workers - service call timeout")
+            elif not refresh_future.result().success:
+                self.get_logger().warn(f"Failed to refresh workers: {refresh_future.result().message}")
+            
+            # Get model list
+            list_request = ListModels.Request()
+            list_future = self.list_models_client.call_async(list_request)
+            
+            rclpy.spin_until_future_complete(self, list_future, timeout_sec=5.0)
+            
+            if list_future.result() is None:
+                self.get_logger().warn("Failed to get model list - service call timeout")
                 return []
             
-            ret = requests.post(self.controller_url + "/list_models")
-            if ret.status_code != 200:
-                self.get_logger().warn("Failed to get model list")
+            result = list_future.result()
+            if not result.success:
+                self.get_logger().warn(f"Failed to get model list: {result.message}")
                 return []
                 
-            models = ret.json()["models"]
+            models = result.models
             models.sort(key=lambda x: self.priority.get(x, x))
             self.logger.info(f"Models: {models}")
             return models
+            
         except Exception as e:
             self.get_logger().error(f"Error getting model list: {e}")
             return []
@@ -271,9 +327,50 @@ class RoboPointNode(Node):
             
         return None
 
+    def get_worker_service_client(self, worker_name):
+        """Get or create a service client for a specific worker"""
+        if worker_name not in self.worker_clients:
+            service_name = f"{worker_name}/worker_generate_stream"
+            self.worker_clients[worker_name] = self.create_client(
+                WorkerGenerateStream, 
+                service_name
+            )
+            self.get_logger().info(f"Created client for worker service: {service_name}")
+            
+            # Wait for the service to be available
+            if not self.worker_clients[worker_name].wait_for_service(timeout_sec=5.0):
+                self.get_logger().warn(f"Worker service {service_name} not available")
+                
+        return self.worker_clients[worker_name]
+
+    def pil_image_to_base64(self, pil_image):
+        """Convert PIL image to base64 string"""
+        buffered = io.BytesIO()
+        pil_image.save(buffered, format="JPEG", quality=85)
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        return img_str
+
     def query_model(self, state):
-        """Query the vision-language model"""
+        """Query the vision-language model via ROS2 services"""
         try:
+            # Get worker address
+            get_worker_request = GetWorkerAddress.Request()
+            get_worker_request.model = self.model_name
+            
+            worker_future = self.get_worker_client.call_async(get_worker_request)
+            rclpy.spin_until_future_complete(self, worker_future, timeout_sec=5.0)
+            
+            if worker_future.result() is None:
+                self.get_logger().error("Failed to get worker address - service timeout")
+                return None
+                
+            worker_result = worker_future.result()
+            if not worker_result.success or not worker_result.address:
+                self.get_logger().error(f"No available worker for model {self.model_name}")
+                return None
+            
+            worker_name = worker_result.address
+            
             # Select template based on model name
             if 'vicuna' in self.model_name.lower():
                 template_name = "vicuna_v1"
@@ -291,61 +388,62 @@ class RoboPointNode(Node):
             new_state.append_message(new_state.roles[1], None)
             state = new_state
             
-            # Query worker address
-            ret = requests.post(self.controller_url + "/get_worker_address",
-                              json={"model": self.model_name})
-            
-            if ret.status_code != 200:
-                self.get_logger().error("Failed to get worker address")
-                return None
-                
-            worker_addr = ret.json()["address"]
-            if worker_addr == "":
-                self.get_logger().error("No available worker")
-                return None
-            
             # Prepare request
             prompt = state.get_prompt()
             pil_images, images, transforms = state.get_images()
             
-            # Generate image hashes for logging
-            image_hash = []
+            # Convert PIL images to base64 strings for ROS2 message
+            image_data = []
             if pil_images:
-                image_hash = [hashlib.md5(image.tobytes()).hexdigest() for image in pil_images]
-                # Save images for logging
-                for image, hash_val in zip(pil_images, image_hash):
+                for pil_img in pil_images:
+                    img_base64 = self.pil_image_to_base64(pil_img)
+                    image_data.append(img_base64)
+                    
+                    # Save images for logging
+                    image_hash = hashlib.md5(pil_img.tobytes()).hexdigest()
                     t = datetime.datetime.now()
                     filename = os.path.join(LOGDIR, "serve_images", 
                                           f"{t.year}-{t.month:02d}-{t.day:02d}", 
-                                          f"{hash_val}.jpg")
+                                          f"{image_hash}.jpg")
                     if not os.path.isfile(filename):
                         os.makedirs(os.path.dirname(filename), exist_ok=True)
-                        image.save(filename)
+                        pil_img.save(filename)
             
-            # Prepare payload
-            pload = {
-                "model": self.model_name,
-                "prompt": prompt,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-                "max_new_tokens": min(int(self.max_output_tokens), 1536),
-                "stop": state.sep if state.sep_style in [SeparatorStyle.SINGLE, SeparatorStyle.MPT] else state.sep2,
-                "images": images,
-            }
+            # Get worker service client
+            worker_client = self.get_worker_service_client(worker_name)
             
-            # Make request
-            response = requests.post(worker_addr + "/worker_generate_stream",
-                                   headers=self.headers, json=pload, stream=True, timeout=30)
+            # Prepare generate request
+            generate_request = WorkerGenerateStream.Request()
+            generate_request.model = self.model_name
+            generate_request.prompt = prompt
+            generate_request.temperature = self.temperature
+            generate_request.top_p = self.top_p
+            generate_request.max_new_tokens = min(int(self.max_output_tokens), 1536)
+            generate_request.images = image_data
             
-            output = ""
-            for chunk in response.iter_lines(decode_unicode=False, delimiter=b"\0"):
-                if chunk:
-                    data = json.loads(chunk.decode())
-                    if data["error_code"] == 0:
-                        output = data["text"][len(prompt):].strip()
-                    else:
-                        self.get_logger().error(f"Model error: {data['text']}")
-                        return None
+            # Determine stop tokens
+            if state.sep_style in [SeparatorStyle.SINGLE, SeparatorStyle.MPT]:
+                generate_request.stop = state.sep
+            else:
+                generate_request.stop = state.sep2
+            
+            # Call worker service
+            generate_future = worker_client.call_async(generate_request)
+            rclpy.spin_until_future_complete(self, generate_future, timeout_sec=self.service_timeout)
+            
+            if generate_future.result() is None:
+                self.get_logger().error("Worker generate service timeout")
+                return None
+                
+            generate_result = generate_future.result()
+            if not generate_result.success:
+                self.get_logger().error(f"Worker generate error: {generate_result.error_message}")
+                return None
+            
+            # Extract generated text (remove prompt part)
+            output = generate_result.text
+            if output.startswith(prompt):
+                output = output[len(prompt):].strip()
             
             return output
             

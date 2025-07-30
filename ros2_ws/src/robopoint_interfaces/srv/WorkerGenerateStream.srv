@@ -1,0 +1,13 @@
+# WorkerGenerateStream.srv
+# Service for worker to generate text/response
+string model
+string prompt
+float32 temperature
+float32 top_p
+int32 max_new_tokens
+string[] images          # base64 encoded images
+string stop             # stop token
+---
+bool success
+string text
+string error_message

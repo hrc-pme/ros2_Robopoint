@@ -1,0 +1,7 @@
+# GetWorkerAddress.srv
+# Service to get worker address for a specific model
+string model
+---
+bool success
+string address
+string message

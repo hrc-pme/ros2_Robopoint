@@ -1,0 +1,5 @@
+# RefreshAllWorkers.srv
+# Service to refresh all worker nodes
+---
+bool success
+string message
