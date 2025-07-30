@@ -25,6 +25,8 @@ from PIL import Image as PILImage
 # 自定義訊息類型 (需要在 package 中定義)
 from robopoint_msgs.msg import GenerateRequest, GenerateResponse, WorkerStatus
 from robopoint_msgs.srv import WorkerGetStatus, WorkerGenerateStream
+# 新增：導入缺失的服務類型
+from robopoint_interfaces.srv import RefreshAllWorkers, ListModels, GetWorkerAddress
 
 from robopoint_worker.model.builder import load_pretrained_model
 from robopoint_worker.mm_utils import process_images, load_image_from_base64, tokenizer_image_token
@@ -129,6 +131,28 @@ class ROS2ModelWorker(Node):
             callback_group=self.callback_group
         )
         
+        # 🔧 修正：新增缺失的三個關鍵服務
+        self.refresh_service = self.create_service(
+            RefreshAllWorkers,
+            '/refresh_all_workers',
+            self.handle_refresh_all_workers,
+            callback_group=self.callback_group
+        )
+        
+        self.list_models_service = self.create_service(
+            ListModels,
+            '/list_models',
+            self.handle_list_models,
+            callback_group=self.callback_group
+        )
+        
+        self.get_worker_address_service = self.create_service(
+            GetWorkerAddress,
+            '/get_worker_address',
+            self.handle_get_worker_address,
+            callback_group=self.callback_group
+        )
+        
         # 建立 heartbeat timer
         self.heartbeat_timer = self.create_timer(
             self.heartbeat_interval,
@@ -140,6 +164,7 @@ class ROS2ModelWorker(Node):
         self.register_to_controller()
         
         self.get_logger().info(f'Model worker {self.worker_id} initialized successfully')
+        self.get_logger().info(f'Registered services: /refresh_all_workers, /list_models, /get_worker_address')
     
     def register_to_controller(self):
         """註冊到控制器"""
@@ -183,6 +208,49 @@ class ROS2ModelWorker(Node):
         response.model_names = self.model_name
         response.queue_length = self.get_queue_length()
         response.speed = 1.0
+        return response
+    
+    # 🔧 修正：新增缺失的三個服務 callback
+    def handle_refresh_all_workers(self, request, response):
+        """處理刷新所有 worker 的請求"""
+        self.get_logger().info("Received refresh_all_workers request")
+        
+        # 重新發送註冊訊息
+        self.register_to_controller()
+        
+        # 可以在這裡添加其他刷新邏輯，比如重新載入配置等
+        response.success = True
+        response.message = f"Worker {self.worker_id} refreshed successfully"
+        
+        return response
+    
+    def handle_list_models(self, request, response):
+        """處理列出模型的請求"""
+        self.get_logger().info(f"Responding to list_models request with model: {self.model_name}, worker: {self.worker_id}")
+        response.success = True
+        response.model_names = [self.model_name]
+        response.worker_ids = [self.worker_id]
+        response.message = "OK"
+        return response
+    
+    def handle_get_worker_address(self, request, response):
+        """處理獲取 worker 地址的請求"""
+        self.get_logger().info(f"Received get_worker_address request for model: {request.model}")
+        
+        # 檢查請求的模型是否匹配
+        if request.model == self.model_name or not request.model:
+            response.success = True
+            response.worker_id = self.worker_id
+            response.address = f"/model_worker_{self.worker_id}/request"  # 請求 topic
+            response.model_names = [self.model_name]
+            response.message = f"Worker address found for model {self.model_name}"
+        else:
+            response.success = False
+            response.worker_id = ""
+            response.address = ""
+            response.model_names = []
+            response.message = f"Model {request.model} not supported by this worker"
+        
         return response
     
     def generate_callback(self, msg: GenerateRequest):

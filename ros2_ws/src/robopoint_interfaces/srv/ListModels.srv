@@ -2,5 +2,6 @@
 # Service to get list of available models
 ---
 bool success
-string[] models
+string[] model_names
+string[] worker_ids
 string message

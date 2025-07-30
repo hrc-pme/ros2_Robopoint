@@ -25,7 +25,7 @@ from geometry_msgs.msg import Twist  # Using as placeholder for custom messages
 # You'll need to create these custom message/service types in a separate package
 # For now, using standard types as placeholders
 from robopoint_msgs.srv import (
-    RegisterWorker, 
+    RegisterAllWorkers, 
     GetWorkerAddress, 
     ReceiveHeartBeat,
     ListModels,
@@ -76,50 +76,50 @@ class ControllerNode(Node):
         
         # Services
         self.register_worker_srv = self.create_service(
-            RegisterWorker, 
-            'register_worker', 
+            RegisterAllWorkers, 
+            '/register_all_workers', 
             self.register_worker_callback,
             callback_group=self.callback_group
         )
         
         self.refresh_workers_srv = self.create_service(
             Empty, 
-            'refresh_all_workers', 
+            '/refresh_all_workers', 
             self.refresh_all_workers_callback,
             callback_group=self.callback_group
         )
         
         self.list_models_srv = self.create_service(
             ListModels, 
-            'list_models', 
+            '/list_models', 
             self.list_models_callback,
             callback_group=self.callback_group
         )
         
         self.get_worker_address_srv = self.create_service(
             GetWorkerAddress, 
-            'get_worker_address', 
+            '/get_worker_address', 
             self.get_worker_address_callback,
             callback_group=self.callback_group
         )
         
         self.receive_heartbeat_srv = self.create_service(
             ReceiveHeartBeat, 
-            'receive_heart_beat', 
+            '/receive_heart_beat', 
             self.receive_heart_beat_callback,
             callback_group=self.callback_group
         )
         
         self.worker_generate_stream_srv = self.create_service(
             WorkerGenerateStream, 
-            'worker_generate_stream', 
+            '/worker_generate_stream', 
             self.worker_generate_stream_callback,
             callback_group=self.callback_group
         )
         
         self.worker_get_status_srv = self.create_service(
             WorkerGetStatus, 
-            'worker_get_status', 
+            '/worker_get_status', 
             self.worker_get_status_callback,
             callback_group=self.callback_group
         )
@@ -127,14 +127,14 @@ class ControllerNode(Node):
         # Publishers
         self.status_publisher = self.create_publisher(
             WorkerStatus, 
-            'controller_status', 
+            '/controller_status', 
             10
         )
         
         # Subscribers
         self.heartbeat_subscriber = self.create_subscription(
             HeartBeat,
-            'worker_heartbeat',
+            '/worker_heartbeat',
             self.heartbeat_callback,
             10,
             callback_group=self.callback_group

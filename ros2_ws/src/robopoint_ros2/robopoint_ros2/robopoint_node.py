@@ -39,6 +39,12 @@ class RoboPointNode(Node):
         # Initialize logger
         self.logger = build_logger("robopoint_ros2", "robopoint_ros2.log")
         
+        # Priority for model selection - 定義在使用之前
+        self.priority = {
+            "vicuna-13b": "aaaaaaa",
+            "koala-13b": "aaaaaab",
+        }
+        
         # Parameters
         self.declare_parameter('moderate', False)
         self.declare_parameter('temperature', 1.0)
@@ -63,7 +69,7 @@ class RoboPointNode(Node):
         # ROS2 Service Clients for controller communication
         self.refresh_workers_client = self.create_client(
             RefreshAllWorkers, 
-            'refresh_all_workers'
+            '/refresh_all_workers'
         )
         self.list_models_client = self.create_client(
             ListModels, 
@@ -71,7 +77,7 @@ class RoboPointNode(Node):
         )
         self.get_worker_client = self.create_client(
             GetWorkerAddress, 
-            'get_worker_address'
+            '/get_worker_address'
         )
         
         # Wait for controller services to be available
@@ -81,12 +87,6 @@ class RoboPointNode(Node):
         self.models = self.get_model_list()
         if not self.model_name and self.models:
             self.model_name = self.models[0]
-        
-        # Priority for model selection
-        self.priority = {
-            "vicuna-13b": "aaaaaaa",
-            "koala-13b": "aaaaaab",
-        }
         
         # Publishers
         self.affordance_pub = self.create_publisher(
@@ -176,7 +176,7 @@ class RoboPointNode(Node):
                 self.get_logger().warn(f"Failed to get model list: {result.message}")
                 return []
                 
-            models = result.models
+            models = result.model_names
             models.sort(key=lambda x: self.priority.get(x, x))
             self.logger.info(f"Models: {models}")
             return models

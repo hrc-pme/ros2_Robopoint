@@ -17,7 +17,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GenerateResponse.msg"
   "msg/HeartBeat.msg"
   "msg/WorkerStatus.msg"
-  "srv/RegisterWorker.srv"
+  "srv/RegisterAllWorkers.srv"
   "srv/GetWorkerAddress.srv"
   "srv/ReceiveHeartBeat.srv"
   "srv/ListModels.srv"
