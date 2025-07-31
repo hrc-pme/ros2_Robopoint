@@ -45,10 +45,41 @@ def generate_launch_description():
             description='Timeout for ROS2 service calls in seconds'
         ),
         
+        # Camera parameters
+        DeclareLaunchArgument(
+            'camera_device',
+            default_value='/dev/video2',
+            description='Camera device path or index'
+        ),
+        
+        DeclareLaunchArgument(
+            'camera_fps',
+            default_value='30.0',
+            description='Camera frame rate'
+        ),
+        
+        DeclareLaunchArgument(
+            'camera_width',
+            default_value='640',
+            description='Camera frame width'
+        ),
+        
+        DeclareLaunchArgument(
+            'camera_height',
+            default_value='480',
+            description='Camera frame height'
+        ),
+        
+        DeclareLaunchArgument(
+            'enable_camera',
+            default_value='true',
+            description='Enable internal camera capture'
+        ),
+        
         DeclareLaunchArgument(
             'camera_topic',
             default_value='/camera/image_raw',
-            description='Camera image topic'
+            description='Camera image topic (for remapping if needed)'
         ),
         
         DeclareLaunchArgument(

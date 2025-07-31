@@ -25,6 +25,7 @@ import re
 import time
 import base64
 import io
+import threading
 from robopoint_controller.conversation import (default_conversation, conv_templates, SeparatorStyle)
 from robopoint_controller.constants import LOGDIR
 from robopoint_controller.utils import (
@@ -52,6 +53,12 @@ class RoboPointNode(Node):
         self.declare_parameter('max_output_tokens', 512)
         self.declare_parameter('model_name', '')
         self.declare_parameter('service_timeout', 30.0)
+        # Camera parameters
+        self.declare_parameter('camera_device', '/dev/video4')
+        self.declare_parameter('camera_fps', 30.0)
+        self.declare_parameter('camera_width', 640)
+        self.declare_parameter('camera_height', 480)
+        self.declare_parameter('enable_camera', True)
         
         self.moderate = self.get_parameter('moderate').value
         self.temperature = self.get_parameter('temperature').value
@@ -59,12 +66,23 @@ class RoboPointNode(Node):
         self.max_output_tokens = self.get_parameter('max_output_tokens').value
         self.model_name = self.get_parameter('model_name').value
         self.service_timeout = self.get_parameter('service_timeout').value
+        # Camera parameters
+        self.camera_device = self.get_parameter('camera_device').value
+        self.camera_fps = self.get_parameter('camera_fps').value
+        self.camera_width = self.get_parameter('camera_width').value
+        self.camera_height = self.get_parameter('camera_height').value
+        self.enable_camera = self.get_parameter('enable_camera').value
         
         # Initialize CV bridge
         self.bridge = CvBridge()
         
         # Initialize conversation state
         self.conversation_state = default_conversation.copy()
+        
+        # Camera related variables
+        self.camera = None
+        self.camera_thread = None
+        self.camera_running = False
         
         # ROS2 Service Clients for controller communication
         self.refresh_workers_client = self.create_client(
@@ -101,6 +119,13 @@ class RoboPointNode(Node):
             10
         )
         
+        # Camera image publisher
+        self.camera_pub = self.create_publisher(
+            Image,
+            'camera/image_raw',
+            10
+        )
+        
         # Subscribers
         self.query_sub = self.create_subscription(
             SpatialAffordanceQuery,
@@ -109,9 +134,10 @@ class RoboPointNode(Node):
             10
         )
         
+        # Optional: still keep the external image subscription for flexibility
         self.image_sub = self.create_subscription(
             Image,
-            'camera/image_raw',
+            'external_camera/image_raw',
             self.handle_image_callback,
             10
         )
@@ -130,7 +156,100 @@ class RoboPointNode(Node):
         # Cache for worker service clients
         self.worker_clients = {}
         
+        # Initialize camera if enabled
+        if self.enable_camera:
+            self.init_camera()
+        
         self.get_logger().info(f'RoboPoint node initialized with models: {self.models}')
+        if self.enable_camera:
+            self.get_logger().info(f'Camera enabled on device: {self.camera_device}')
+
+    def init_camera(self):
+        """Initialize and start camera capture"""
+        try:
+            # Try to parse camera device (support both index and device path)
+            if self.camera_device.startswith('/dev/video'):
+                # Extract number from /dev/videoX
+                device_num = int(self.camera_device.split('video')[1])
+            else:
+                device_num = int(self.camera_device)
+            
+            self.camera = cv2.VideoCapture(device_num)
+            
+            if not self.camera.isOpened():
+                self.get_logger().error(f"Failed to open camera device: {self.camera_device}")
+                return
+            
+            # Set camera properties
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.camera_width)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.camera_height)
+            self.camera.set(cv2.CAP_PROP_FPS, self.camera_fps)
+            
+            # Verify settings
+            actual_width = self.camera.get(cv2.CAP_PROP_FRAME_WIDTH)
+            actual_height = self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            actual_fps = self.camera.get(cv2.CAP_PROP_FPS)
+            
+            self.get_logger().info(f"Camera initialized: {actual_width}x{actual_height} @ {actual_fps} FPS")
+            
+            # Start camera thread
+            self.camera_running = True
+            self.camera_thread = threading.Thread(target=self.camera_loop)
+            self.camera_thread.daemon = True
+            self.camera_thread.start()
+            
+        except Exception as e:
+            self.get_logger().error(f"Error initializing camera: {e}")
+            self.camera = None
+
+    def camera_loop(self):
+        """Camera capture loop running in separate thread"""
+        if not self.camera:
+            return
+        
+        # Calculate sleep time based on FPS
+        sleep_time = 1.0 / self.camera_fps
+        
+        while self.camera_running and rclpy.ok():
+            try:
+                ret, frame = self.camera.read()
+                if not ret:
+                    self.get_logger().warn("Failed to read frame from camera")
+                    time.sleep(sleep_time)
+                    continue
+                
+                # Store latest image for affordance processing
+                self.latest_image = frame.copy()
+                
+                # Convert to PIL for processing
+                rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                self.latest_pil_image = PILImage.fromarray(rgb_image)
+                
+                # Convert to ROS Image message and publish
+                try:
+                    ros_image = self.bridge.cv2_to_imgmsg(frame, "bgr8")
+                    ros_image.header.stamp = self.get_clock().now().to_msg()
+                    ros_image.header.frame_id = "camera_frame"
+                    self.camera_pub.publish(ros_image)
+                except Exception as e:
+                    self.get_logger().error(f"Error publishing camera image: {e}")
+                
+                time.sleep(sleep_time)
+                
+            except Exception as e:
+                self.get_logger().error(f"Error in camera loop: {e}")
+                time.sleep(sleep_time)
+
+    def cleanup_camera(self):
+        """Clean up camera resources"""
+        self.camera_running = False
+        if self.camera_thread and self.camera_thread.is_alive():
+            self.camera_thread.join(timeout=1.0)
+        
+        if self.camera:
+            self.camera.release()
+            self.camera = None
+            self.get_logger().info("Camera resources cleaned up")
 
     def wait_for_controller_services(self):
         """Wait for controller services to become available"""
@@ -186,18 +305,21 @@ class RoboPointNode(Node):
             return []
 
     def handle_image_callback(self, msg):
-        """Handle incoming image messages"""
+        """Handle incoming external image messages (kept for flexibility)"""
         try:
             # Convert ROS Image to OpenCV format
             cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-            self.latest_image = cv_image
             
-            # Convert to PIL for processing
-            rgb_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-            self.latest_pil_image = PILImage.fromarray(rgb_image)
+            # Only update if we're not using internal camera or as fallback
+            if not self.enable_camera or self.latest_image is None:
+                self.latest_image = cv_image
+                
+                # Convert to PIL for processing
+                rgb_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+                self.latest_pil_image = PILImage.fromarray(rgb_image)
             
         except Exception as e:
-            self.get_logger().error(f"Error processing image: {e}")
+            self.get_logger().error(f"Error processing external image: {e}")
 
     def handle_affordance_query(self, msg):
         """Handle spatial affordance query messages"""
@@ -507,10 +629,16 @@ class RoboPointNode(Node):
         name = os.path.join(LOGDIR, f"{t.year}-{t.month:02d}-{t.day:02d}-conv.json")
         return name
 
+    def destroy_node(self):
+        """Clean up resources when node is destroyed"""
+        self.cleanup_camera()
+        super().destroy_node()
+
 
 def main(args=None):
     rclpy.init(args=args)
     
+    node = None
     try:
         node = RoboPointNode()
         rclpy.spin(node)
@@ -519,6 +647,8 @@ def main(args=None):
     except Exception as e:
         print(f"Error: {e}")
     finally:
+        if node:
+            node.cleanup_camera()
         if rclpy.ok():
             rclpy.shutdown()
 

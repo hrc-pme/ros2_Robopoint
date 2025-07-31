@@ -3,5 +3,7 @@
 string model
 ---
 bool success
+string worker_id
 string address
+string[] model_names
 string message
