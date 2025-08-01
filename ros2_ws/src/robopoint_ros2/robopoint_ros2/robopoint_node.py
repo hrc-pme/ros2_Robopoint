@@ -91,7 +91,7 @@ class RoboPointNode(Node):
         )
         self.list_models_client = self.create_client(
             ListModels, 
-            'list_models'
+            '/list_models'
         )
         self.get_worker_client = self.create_client(
             GetWorkerAddress, 
@@ -452,7 +452,7 @@ class RoboPointNode(Node):
     def get_worker_service_client(self, worker_name):
         """Get or create a service client for a specific worker"""
         if worker_name not in self.worker_clients:
-            service_name = f"{worker_name}/worker_generate_stream"
+            service_name = f"/model_worker_{worker_name}/generate_stream"
             self.worker_clients[worker_name] = self.create_client(
                 WorkerGenerateStream, 
                 service_name

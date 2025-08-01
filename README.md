@@ -5,7 +5,8 @@ This repository contains a set of ROS&nbsp;2 packages used to run the **RoboPoin
 - `robopoint_worker` – provides a worker node that loads a multimodal model and exposes services for text/image generation.
 - `robopoint_controller` – manages worker registration and dispatches requests.
 - `robopoint_ros2` – client node for sending queries and visualizing results.
-- `robopoint_interfaces` and `robopoint_msgs` – custom messages and service definitions used by the other packages.
+- `robopoint_gui` – GUI interface node for direct user interaction and result visualization.
+- `robopoint_interfaces` – custom messages and service definitions used by the other packages.
 
 A Docker environment is provided to simplify setup.
 
@@ -56,7 +57,7 @@ source install/local_setup.bash
 2. **Worker** – loads a model and connects to the controller:
 
    ```bash
-   ros2 launch robopoint_worker model_worker.launch.py
+   ros2 launch robopoint_worker model_worker.launch.py model_path:=wentao-yuan/robopoint-v1-vicuna-v1.5-13b
    ```
 
    You can override model settings by passing parameters, e.g. `model_path:=wentao-yuan/robopoint-v1-vicuna-v1.5-13b`.
@@ -69,6 +70,12 @@ source install/local_setup.bash
 
    Use `--ros-args` to set parameters such as `controller_url` or `model_name`.
 
+4. **GUI Node** – optional Qt-based interface for sending queries and displaying results:
+
+   ```bash
+   ros2 run robopoint_gui robopoint_gui_node
+   ```
+
 ## Repository layout
 
 ```
@@ -77,8 +84,9 @@ ros2_ws/            ROS 2 workspace
 │   ├── robopoint_worker/       Worker node package
 │   ├── robopoint_controller/   Controller node package
 │   ├── robopoint_ros2/         Client demo node
+│   ├── robopoint_gui/          GUI interface node
 │   ├── robopoint_interfaces/   Interface definitions
-│   └── robopoint_msgs/         Message/service definitions
+│   └── robopoint_interfaces/   Message/service definitions
 └── ...
 ```
 

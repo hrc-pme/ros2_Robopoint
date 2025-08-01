@@ -10,7 +10,7 @@
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
-  <depend>robopoint_msgs</depend>
+  <depend>robopoint_interfaces</depend>
   <depend>geometry_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>

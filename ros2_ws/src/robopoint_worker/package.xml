@@ -13,7 +13,7 @@
   <!-- 必要執行相依 -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
-  <exec_depend>robopoint_msgs</exec_depend>
+  <exec_depend>robopoint_interfaces</exec_depend>
 
   <!-- 測試工具 -->
   <test_depend>ament_copyright</test_depend>

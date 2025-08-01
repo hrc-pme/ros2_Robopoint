@@ -18,11 +18,18 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/AffordancePoint.msg"
   "msg/SpatialAffordanceQuery.msg"
   "msg/SpatialAffordanceResponse.msg"
+  "msg/GenerateRequest.msg"
+  "msg/GenerateResponse.msg"
+  "msg/HeartBeat.msg"
+  "msg/WorkerStatus.msg"
   "srv/GetWorkerAddress.srv"
   "srv/ListModels.srv"
   "srv/ProcessImage.srv"
   "srv/RefreshAllWorkers.srv"
   "srv/WorkerGenerateStream.srv"
+  "srv/ReceiveHeartBeat.srv"
+  "srv/RegisterAllWorkers.srv"
+  "srv/WorkerGetStatus.srv"
   DEPENDENCIES builtin_interfaces std_msgs sensor_msgs geometry_msgs
 )
 

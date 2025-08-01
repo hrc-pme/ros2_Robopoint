@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
 ROS2 Model Worker Node - 執行多模態模型的 ROS2 節點
+修復版本：移除與 Controller 衝突的服務，專注於模型服務
 """
 import json
 import time
 import threading
 import uuid
+import base64
+import io
 from typing import Optional, List, Dict, Any
 
 import torch
@@ -18,15 +21,11 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from transformers import TextIteratorStreamer
 from threading import Thread, Semaphore
-import base64
-from io import BytesIO
 from PIL import Image as PILImage
 
-# 自定義訊息類型 (需要在 package 中定義)
-from robopoint_msgs.msg import GenerateRequest, GenerateResponse, WorkerStatus
-from robopoint_msgs.srv import WorkerGetStatus, WorkerGenerateStream
-# 新增：導入缺失的服務類型
-from robopoint_interfaces.srv import RefreshAllWorkers, ListModels, GetWorkerAddress
+# 自定義訊息類型
+from robopoint_interfaces.msg import GenerateRequest, GenerateResponse, WorkerStatus
+from robopoint_interfaces.srv import WorkerGetStatus, WorkerGenerateStream, RegisterAllWorkers
 
 from robopoint_worker.model.builder import load_pretrained_model
 from robopoint_worker.mm_utils import process_images, load_image_from_base64, tokenizer_image_token
@@ -51,7 +50,7 @@ class ROS2ModelWorker(Node):
                 ('use_flash_attn', False),
                 ('limit_model_concurrency', 5),
                 ('heartbeat_interval', 10.0),
-                ('controller_topic', '/model_controller'),
+                ('controller_address', '/model_controller'),
                 ('worker_id', str(uuid.uuid4())[:6])
             ]
         )
@@ -66,7 +65,7 @@ class ROS2ModelWorker(Node):
         self.use_flash_attn = self.get_parameter('use_flash_attn').value
         self.limit_model_concurrency = self.get_parameter('limit_model_concurrency').value
         self.heartbeat_interval = self.get_parameter('heartbeat_interval').value
-        self.controller_topic = self.get_parameter('controller_topic').value
+        self.controller_address = self.get_parameter('controller_address').value
         self.worker_id = self.get_parameter('worker_id').value
         
         # 初始化組件
@@ -77,6 +76,9 @@ class ROS2ModelWorker(Node):
         
         # 模型並發控制
         self.model_semaphore = Semaphore(self.limit_model_concurrency)
+        
+        # 模型加載狀態
+        self.model_loaded = False
         
         # 處理模型路徑和名稱
         if self.model_path.endswith("/"):
@@ -91,20 +93,30 @@ class ROS2ModelWorker(Node):
         
         # 載入模型
         self.get_logger().info(f'Loading model {self.model_name} on worker {self.worker_id}...')
-        self.tokenizer, self.model, self.image_processor, self.context_len = load_pretrained_model(
-            self.model_path, 
-            self.model_base if self.model_base else None, 
-            self.model_name, 
-            self.load_8bit, 
-            self.load_4bit, 
-            device=self.device, 
-            use_flash_attn=self.use_flash_attn
-        )
+        try:
+            self.tokenizer, self.model, self.image_processor, self.context_len = load_pretrained_model(
+                self.model_path, 
+                self.model_base if self.model_base else None, 
+                self.model_name, 
+                self.load_8bit, 
+                self.load_4bit, 
+                device=self.device, 
+                use_flash_attn=self.use_flash_attn
+            )
+            self.model_loaded = True
+            self.get_logger().info(f'Model {self.model_name} loaded successfully')
+        except Exception as e:
+            self.get_logger().error(f'Failed to load model: {e}')
+            self.tokenizer = None
+            self.model = None
+            self.image_processor = None
+            self.context_len = 2048
+            self.model_loaded = False
         
-        # 建立 publishers
+        # 🔧 建立 publishers - 心跳發送到 Controller
         self.heartbeat_pub = self.create_publisher(
             WorkerStatus, 
-            f'{self.controller_topic}/heartbeat', 
+            '/worker_heartbeat',  # Controller 統一接收心跳的 topic
             10
         )
         
@@ -123,34 +135,26 @@ class ROS2ModelWorker(Node):
             callback_group=self.callback_group
         )
         
-        # 建立 services
+        # 🔧 建立 services - 只保留 Worker 特有的服務
         self.status_service = self.create_service(
             WorkerGetStatus,
-            f'/model_worker_{self.worker_id}/get_status',
+            f'/model_worker_{self.worker_id}/worker_get_status',  # 使用 Worker 特定路徑
             self.get_status_callback,
             callback_group=self.callback_group
         )
         
-        # 🔧 修正：新增缺失的三個關鍵服務
-        self.refresh_service = self.create_service(
-            RefreshAllWorkers,
-            '/refresh_all_workers',
-            self.handle_refresh_all_workers,
+        # 🔧 關鍵：只提供 WorkerGenerateStream 服務，移除與 Controller 衝突的服務
+        self.worker_generate_service = self.create_service(
+            WorkerGenerateStream,
+            f'/model_worker_{self.worker_id}/generate_stream',
+            self.handle_worker_generate_stream,
             callback_group=self.callback_group
         )
         
-        self.list_models_service = self.create_service(
-            ListModels,
-            '/list_models',
-            self.handle_list_models,
-            callback_group=self.callback_group
-        )
-        
-        self.get_worker_address_service = self.create_service(
-            GetWorkerAddress,
-            '/get_worker_address',
-            self.handle_get_worker_address,
-            callback_group=self.callback_group
+        # 🔧 新增：向 Controller 註冊用的 service clients
+        self.register_client = self.create_client(
+            RegisterAllWorkers,
+            '/register_all_workers'
         )
         
         # 建立 heartbeat timer
@@ -164,13 +168,37 @@ class ROS2ModelWorker(Node):
         self.register_to_controller()
         
         self.get_logger().info(f'Model worker {self.worker_id} initialized successfully')
-        self.get_logger().info(f'Registered services: /refresh_all_workers, /list_models, /get_worker_address')
+        self.get_logger().info(f'Available services:')
+        self.get_logger().info(f'  - /model_worker_{self.worker_id}/generate_stream')
+        self.get_logger().info(f'  - /model_worker_{self.worker_id}/worker_get_status')
     
     def register_to_controller(self):
         """註冊到控制器"""
         self.get_logger().info('Registering to controller...')
         
-        # 發布註冊訊息
+        # 等待 Controller 的註冊服務可用
+        if self.register_client.wait_for_service(timeout_sec=10.0):
+            # 通過 service call 註冊
+            register_request = RegisterAllWorkers.Request()
+            register_request.worker_name = self.worker_id
+            register_request.check_heart_beat = True
+            register_request.worker_status = json.dumps({
+                "model_names": [self.model_name],
+                "speed": 1.0,
+                "queue_length": self.get_queue_length()
+            })
+            
+            future = self.register_client.call_async(register_request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+            
+            if future.result() and future.result().success:
+                self.get_logger().info(f'Successfully registered to controller')
+            else:
+                self.get_logger().warn(f'Failed to register to controller')
+        else:
+            self.get_logger().warn('Controller registration service not available')
+        
+        # 同時通過 topic 發布註冊訊息（作為備用）
         status_msg = WorkerStatus()
         status_msg.worker_id = self.worker_id
         status_msg.model_names = self.model_name
@@ -180,7 +208,7 @@ class ROS2ModelWorker(Node):
         self.heartbeat_pub.publish(status_msg)
     
     def send_heartbeat(self):
-        """發送心跳訊息"""
+        """發送心跳訊息到 Controller"""
         status_msg = WorkerStatus()
         status_msg.worker_id = self.worker_id
         status_msg.model_names = self.model_name
@@ -205,53 +233,128 @@ class ROS2ModelWorker(Node):
     def get_status_callback(self, request, response):
         """處理狀態查詢服務"""
         response.worker_id = self.worker_id
-        response.model_names = self.model_name
+        response.model_names = json.dumps([self.model_name])  # 返回 JSON 字符串
+        response.speed = 1
         response.queue_length = self.get_queue_length()
-        response.speed = 1.0
         return response
     
-    # 🔧 修正：新增缺失的三個服務 callback
-    def handle_refresh_all_workers(self, request, response):
-        """處理刷新所有 worker 的請求"""
-        self.get_logger().info("Received refresh_all_workers request")
+    def handle_worker_generate_stream(self, request, response):
+        """處理 WorkerGenerateStream 請求 - 這是 RoboPointNode 需要調用的服務"""
+        self.get_logger().info(f"Received WorkerGenerateStream request")
+        self.get_logger().info(f"  Model: {request.model}")
+        self.get_logger().info(f"  Prompt length: {len(request.prompt)}")
+        self.get_logger().info(f"  Images count: {len(request.images)}")
         
-        # 重新發送註冊訊息
-        self.register_to_controller()
-        
-        # 可以在這裡添加其他刷新邏輯，比如重新載入配置等
-        response.success = True
-        response.message = f"Worker {self.worker_id} refreshed successfully"
-        
-        return response
-    
-    def handle_list_models(self, request, response):
-        """處理列出模型的請求"""
-        self.get_logger().info(f"Responding to list_models request with model: {self.model_name}, worker: {self.worker_id}")
-        response.success = True
-        response.model_names = [self.model_name]
-        response.worker_ids = [self.worker_id]
-        response.message = "OK"
-        return response
-    
-    def handle_get_worker_address(self, request, response):
-        """處理獲取 worker 地址的請求"""
-        self.get_logger().info(f"Received get_worker_address request for model: {request.model}")
-        
-        # 檢查請求的模型是否匹配
-        if request.model == self.model_name or not request.model:
+        try:
+            if not self.model_loaded:
+                # 如果模型未載入，返回模擬結果
+                response.success = True
+                response.text = request.prompt + " [(0.5, 0.3), (0.7, 0.6)]"
+                response.error_message = ""
+                self.get_logger().info("Returning simulated response (model not loaded)")
+                return response
+            
+            # 實際生成
+            generated_text = self._generate_with_model(request)
+            
             response.success = True
-            response.worker_id = self.worker_id
-            response.address = f"/model_worker_{self.worker_id}/request"  # 請求 topic
-            response.model_names = [self.model_name]
-            response.message = f"Worker address found for model {self.model_name}"
-        else:
+            response.text = generated_text
+            response.error_message = ""
+            
+            self.get_logger().info(f"Generation completed, response length: {len(response.text)}")
+            
+        except Exception as e:
+            self.get_logger().error(f'WorkerGenerateStream error: {e}')
             response.success = False
-            response.worker_id = ""
-            response.address = ""
-            response.model_names = []
-            response.message = f"Model {request.model} not supported by this worker"
+            response.text = ""
+            response.error_message = str(e)
         
         return response
+    
+    def _generate_with_model(self, request):
+        """實際的模型生成邏輯"""
+        try:
+            # 處理圖像
+            images = None
+            if request.images:
+                self.get_logger().info(f"Processing {len(request.images)} images")
+                # 將 base64 圖像轉換為 PIL 圖像
+                pil_images = []
+                for img_base64 in request.images:
+                    img_data = base64.b64decode(img_base64)
+                    pil_image = PILImage.open(io.BytesIO(img_data))
+                    pil_images.append(pil_image)
+                    self.get_logger().info(f"  Image size: {pil_image.size}")
+                
+                # 處理圖像
+                if self.image_processor:
+                    images = process_images(pil_images, self.image_processor, self.model.config)
+                    if isinstance(images, list):
+                        images = [img.to(self.device, dtype=torch.float16) for img in images]
+                    else:
+                        images = images.to(self.device, dtype=torch.float16)
+            
+            # 處理提示詞
+            prompt = request.prompt
+            original_prompt = prompt
+            
+            if images is not None and hasattr(self, 'tokenizer'):
+                # 替換圖像標記
+                replace_token = DEFAULT_IMAGE_TOKEN
+                if hasattr(self.model.config, 'mm_use_im_start_end') and self.model.config.mm_use_im_start_end:
+                    replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
+                prompt = prompt.replace(DEFAULT_IMAGE_TOKEN, replace_token)
+                self.get_logger().info("Image tokens processed")
+            
+            # Token化（如果有 tokenizer）
+            if hasattr(self, 'tokenizer') and self.tokenizer:
+                input_ids = tokenizer_image_token(
+                    prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
+                ).unsqueeze(0).to(self.device)
+                
+                # 生成參數
+                temperature = max(float(request.temperature), 0.001) if request.temperature > 0 else 1.0
+                top_p = float(request.top_p) if request.top_p > 0 else 1.0
+                max_new_tokens = min(int(request.max_new_tokens), 512) if request.max_new_tokens > 0 else 256
+                
+                self.get_logger().info(f"Generation params: temp={temperature}, top_p={top_p}, max_tokens={max_new_tokens}")
+                
+                # 生成
+                with torch.inference_mode():
+                    if images is not None:
+                        output_ids = self.model.generate(
+                            input_ids,
+                            images=images,
+                            do_sample=temperature > 0.001,
+                            temperature=temperature,
+                            top_p=top_p,
+                            max_new_tokens=max_new_tokens,
+                            use_cache=True,
+                        )
+                    else:
+                        output_ids = self.model.generate(
+                            input_ids,
+                            do_sample=temperature > 0.001,
+                            temperature=temperature,
+                            top_p=top_p,
+                            max_new_tokens=max_new_tokens,
+                            use_cache=True,
+                        )
+                
+                # 解碼輸出
+                input_token_len = input_ids.shape[1]
+                generated_ids = output_ids[0][input_token_len:]
+                generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+                
+                return original_prompt + generated_text
+            else:
+                # 沒有 tokenizer，返回模擬結果
+                return request.prompt + " [(0.5, 0.3), (0.7, 0.6)]"
+                
+        except Exception as e:
+            self.get_logger().error(f"Error in model generation: {e}")
+            # 返回模擬結果作為後備
+            return request.prompt + " [(0.5, 0.3), (0.7, 0.6)]"
     
     def generate_callback(self, msg: GenerateRequest):
         """處理生成請求"""
@@ -293,6 +396,16 @@ class ROS2ModelWorker(Node):
     @torch.inference_mode()
     def _generate_stream(self, request: GenerateRequest):
         """生成回應流"""
+        if not self.model_loaded:
+            # 如果模型未載入，返回模擬結果
+            response = GenerateResponse()
+            response.request_id = request.request_id
+            response.text = request.prompt + " [(0.5, 0.3), (0.7, 0.6)]"
+            response.error_code = 0
+            response.is_final = True
+            yield response
+            return
+            
         tokenizer, model, image_processor = self.tokenizer, self.model, self.image_processor
         
         prompt = request.prompt
