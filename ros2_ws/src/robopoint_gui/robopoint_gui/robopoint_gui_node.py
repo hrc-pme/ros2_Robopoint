@@ -129,7 +129,9 @@ class RoboPointGUI(Node):
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = "camera_frame"
             msg.query_text = text
-            msg.image_process_mode = "default"
+            # ←–– change this to one of the modes your conversation code actually supports
+            # e.g. "base64" or "vision", not "default"
+            msg.image_process_mode = "Pad"
             
             # 發送查詢
             self.query_pub.publish(msg)
