@@ -2,6 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from sensor_msgs.msg import Image
 from std_msgs.msg import String, Empty
 from geometry_msgs.msg import Point, PointStamped
@@ -26,6 +27,7 @@ import time
 import base64
 import io
 import threading
+from concurrent.futures import TimeoutError
 from robopoint_controller.conversation import (default_conversation, conv_templates, SeparatorStyle)
 from robopoint_controller.constants import LOGDIR
 from robopoint_controller.utils import (
@@ -84,27 +86,10 @@ class RoboPointNode(Node):
         self.camera_thread = None
         self.camera_running = False
         
-        # ROS2 Service Clients for controller communication
-        self.refresh_workers_client = self.create_client(
-            RefreshAllWorkers, 
-            '/refresh_all_workers'
-        )
-        self.list_models_client = self.create_client(
-            ListModels, 
-            '/list_models'
-        )
-        self.get_worker_client = self.create_client(
-            GetWorkerAddress, 
-            '/get_worker_address'
-        )
-        
-        # Wait for controller services to be available
-        self.wait_for_controller_services()
-        
         # Get available models
-        self.models = self.get_model_list()
-        if not self.model_name and self.models:
-            self.model_name = self.models[0]
+        # 延後取得模型清單，確保其他節點都已準備好
+        self.models = []
+        self.create_timer(5.0, self.delayed_model_init)
         
         # Publishers
         self.affordance_pub = self.create_publisher(
@@ -152,9 +137,6 @@ class RoboPointNode(Node):
         # Store latest image
         self.latest_image = None
         self.latest_pil_image = None
-        
-        # Cache for worker service clients
-        self.worker_clients = {}
         
         # Initialize camera if enabled
         if self.enable_camera:
@@ -251,53 +233,78 @@ class RoboPointNode(Node):
             self.camera = None
             self.get_logger().info("Camera resources cleaned up")
 
-    def wait_for_controller_services(self):
-        """Wait for controller services to become available"""
-        services_to_wait = [
-            (self.refresh_workers_client, 'refresh_all_workers'),
-            (self.list_models_client, 'list_models'),
-            (self.get_worker_client, 'get_worker_address')
-        ]
-        
-        for client, service_name in services_to_wait:
-            self.get_logger().info(f'Waiting for service: {service_name}')
-            if not client.wait_for_service(timeout_sec=10.0):
-                self.get_logger().warn(f'Service {service_name} not available after 10 seconds')
-            else:
-                self.get_logger().info(f'Service {service_name} is ready')
+    def call_service(self, service_type, service_name, request, timeout_sec=30.0):
+        """
+        彻底隔离版 service call：
+        - 临时建 node + client
+        - 用 SingleThreadedExecutor.spin_until_future_complete 等回包
+        - destroy
+        """
+        # 1) 新 node
+        tmp_node = rclpy.create_node('tmp_client_node')
+        # 2) 用同样的 srv type & name
+        tmp_client = tmp_node.create_client(service_type, service_name)
+        if not tmp_client.wait_for_service(timeout_sec=5.0):
+            tmp_node.destroy_node()
+            return None
+
+        # 3) call
+        future = tmp_client.call_async(request)
+
+        # 4) 临时 executor, spin until ready
+        tmp_exec = SingleThreadedExecutor()
+        tmp_exec.add_node(tmp_node)
+        tmp_exec.spin_until_future_complete(future, timeout_sec=timeout_sec)
+        tmp_exec.shutdown()
+
+        # 5) tidy up
+        result = future.result() if future.done() else None
+        tmp_node.destroy_node()
+        return result
 
     def get_model_list(self):
-        """Get available models from controller via ROS2 services"""
+        """Get available models from controller via ROS2 services - 修復版本"""
         try:
             # Refresh all workers first
             refresh_request = RefreshAllWorkers.Request()
-            refresh_future = self.refresh_workers_client.call_async(refresh_request)
+            refresh_result = self.call_service(
+                RefreshAllWorkers,
+                '/refresh_all_workers',
+                refresh_request,
+                timeout_sec=15.0
+            )
             
-            rclpy.spin_until_future_complete(self, refresh_future, timeout_sec=5.0)
+            if refresh_result is None:
+                self.get_logger().warn("Failed to refresh workers - no result")
+                return []
+            elif not refresh_result.success:
+                self.get_logger().warn(f"Failed to refresh workers: {refresh_result.message}")
+                return []
             
-            if refresh_future.result() is None:
-                self.get_logger().warn("Failed to refresh workers - service call timeout")
-            elif not refresh_future.result().success:
-                self.get_logger().warn(f"Failed to refresh workers: {refresh_future.result().message}")
+            self.get_logger().info("Workers refreshed successfully")
             
             # Get model list
             list_request = ListModels.Request()
-            list_future = self.list_models_client.call_async(list_request)
+            list_result = self.call_service(
+                ListModels,
+                '/list_models',
+                list_request,
+                timeout_sec=15.0
+            )
             
-            rclpy.spin_until_future_complete(self, list_future, timeout_sec=5.0)
-            
-            if list_future.result() is None:
-                self.get_logger().warn("Failed to get model list - service call timeout")
+            if list_result is None:
+                self.get_logger().warn("Failed to get model list - no result")
                 return []
             
-            result = list_future.result()
-            if not result.success:
-                self.get_logger().warn(f"Failed to get model list: {result.message}")
+            self.get_logger().info(f"[DEBUG] list_models result: success={list_result.success}, models={list_result.model_names}, workers={list_result.worker_ids}")
+
+            if not list_result.success:
+                self.get_logger().warn(f"Failed to get model list: {list_result.message}")
                 return []
                 
-            models = result.model_names
+            models = list_result.model_names
             models.sort(key=lambda x: self.priority.get(x, x))
-            self.logger.info(f"Models: {models}")
+            self.get_logger().info(f"Models: {models}")
             return models
             
         except Exception as e:
@@ -449,22 +456,6 @@ class RoboPointNode(Node):
             
         return None
 
-    def get_worker_service_client(self, worker_name):
-        """Get or create a service client for a specific worker"""
-        if worker_name not in self.worker_clients:
-            service_name = f"/model_worker_{worker_name}/generate_stream"
-            self.worker_clients[worker_name] = self.create_client(
-                WorkerGenerateStream, 
-                service_name
-            )
-            self.get_logger().info(f"Created client for worker service: {service_name}")
-            
-            # Wait for the service to be available
-            if not self.worker_clients[worker_name].wait_for_service(timeout_sec=5.0):
-                self.get_logger().warn(f"Worker service {service_name} not available")
-                
-        return self.worker_clients[worker_name]
-
     def pil_image_to_base64(self, pil_image):
         """Convert PIL image to base64 string"""
         buffered = io.BytesIO()
@@ -473,20 +464,23 @@ class RoboPointNode(Node):
         return img_str
 
     def query_model(self, state):
-        """Query the vision-language model via ROS2 services"""
+        """Query the vision-language model via ROS2 services - 修復版本"""
         try:
             # Get worker address
             get_worker_request = GetWorkerAddress.Request()
             get_worker_request.model = self.model_name
             
-            worker_future = self.get_worker_client.call_async(get_worker_request)
-            rclpy.spin_until_future_complete(self, worker_future, timeout_sec=5.0)
+            worker_result = self.call_service(
+                GetWorkerAddress,
+                '/get_worker_address',
+                get_worker_request,
+                timeout_sec=30.0
+            )
             
-            if worker_future.result() is None:
-                self.get_logger().error("Failed to get worker address - service timeout")
+            if worker_result is None:
+                self.get_logger().error("Failed to get worker address - no result")
                 return None
                 
-            worker_result = worker_future.result()
             if not worker_result.success or not worker_result.address:
                 self.get_logger().error(f"No available worker for model {self.model_name}")
                 return None
@@ -531,9 +525,6 @@ class RoboPointNode(Node):
                         os.makedirs(os.path.dirname(filename), exist_ok=True)
                         pil_img.save(filename)
             
-            # Get worker service client
-            worker_client = self.get_worker_service_client(worker_name)
-            
             # Prepare generate request
             generate_request = WorkerGenerateStream.Request()
             generate_request.model = self.model_name
@@ -549,15 +540,19 @@ class RoboPointNode(Node):
             else:
                 generate_request.stop = state.sep2
             
-            # Call worker service
-            generate_future = worker_client.call_async(generate_request)
-            rclpy.spin_until_future_complete(self, generate_future, timeout_sec=self.service_timeout)
+            # Call worker service using the fixed method
+            service_name = f'/model_worker_{worker_name}/generate_stream'
+            generate_result = self.call_service(
+                WorkerGenerateStream,
+                service_name,
+                generate_request,
+                timeout_sec=self.service_timeout
+            )
             
-            if generate_future.result() is None:
-                self.get_logger().error("Worker generate service timeout")
+            if generate_result is None:
+                self.get_logger().error("Worker generate service - no result")
                 return None
                 
-            generate_result = generate_future.result()
             if not generate_result.success:
                 self.get_logger().error(f"Worker generate error: {generate_result.error_message}")
                 return None
@@ -623,6 +618,17 @@ class RoboPointNode(Node):
             self.get_logger().error(f"Error creating visualization: {e}")
             return None
 
+    def delayed_model_init(self):
+        self.get_logger().info("Attempting to get model list (delayed)...")
+        self.models = self.get_model_list()
+        if not self.model_name and self.models:
+            self.model_name = self.models[0]
+            self.get_logger().info(f"Model selected: {self.model_name}")
+        elif self.models:
+            self.get_logger().info(f"Using specified model: {self.model_name}")
+        else:
+            self.get_logger().warn("No models available after delayed init.")
+
     def get_conv_log_filename(self):
         """Get conversation log filename"""
         t = datetime.datetime.now()
@@ -638,19 +644,20 @@ class RoboPointNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     
-    node = None
+    node = RoboPointNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    
     try:
-        node = RoboPointNode()
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     except Exception as e:
         print(f"Error: {e}")
     finally:
-        if node:
-            node.cleanup_camera()
-        if rclpy.ok():
-            rclpy.shutdown()
+        node.cleanup_camera()
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

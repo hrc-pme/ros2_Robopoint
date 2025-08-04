@@ -10,7 +10,7 @@ import json
 import threading
 import time
 from typing import List, Dict, Any
-
+from concurrent.futures import TimeoutError as FutureTimeout
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -202,7 +202,11 @@ class ControllerNode(Node):
         # 確保 model_names 是列表
         model_names = worker_status.get("model_names", [])
         if isinstance(model_names, str):
-            model_names = [model_names]
+            try:
+                # 如果是 JSON 格式的字串就轉成 list
+                model_names = json.loads(model_names)
+            except Exception:
+                model_names = [model_names]
 
         self.worker_info[worker_name] = WorkerInfo(
             model_names, 
@@ -233,14 +237,14 @@ class ControllerNode(Node):
             
         client = self.worker_clients[worker_name]
         if not client.service_is_ready():
-            self.get_logger().debug(f"Service not ready for worker: {worker_name}")
+            self.get_logger().warn(f"Service /model_worker_{worker_name}/worker_get_status not ready")
             return None
-        
+
         request = WorkerGetStatus.Request()
         try:
             future = client.call_async(request)
             rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
-            
+
             if future.result() is not None:
                 result = future.result()
                 model_names = json.loads(result.model_names) if isinstance(result.model_names, str) else result.model_names
@@ -250,21 +254,28 @@ class ControllerNode(Node):
                     "queue_length": result.queue_length
                 }
             else:
-                self.get_logger().debug(f"Service call timeout for worker: {worker_name}")
+                self.get_logger().warn(f"Service call returned None for worker: {worker_name}")
                 return None
-                
+
+        except FutureTimeout:
+            self.get_logger().warn(f"Service call timed out for worker: {worker_name}")
+            return None
         except Exception as e:
-            self.get_logger().debug(f"Error getting worker status: {worker_name}, {e}")
+            self.get_logger().error(f"Error getting worker status: {worker_name}, {e}")
             return None
 
     def refresh_all_workers_callback(self, request, response):
         """處理來自 RoboPointNode 的刷新請求"""
         try:
             self.get_logger().info("Received refresh_all_workers request from RoboPointNode")
-            self.refresh_all_workers()
-            response.success = True
-            response.message = f"Refreshed {len(self.worker_info)} workers"
-            self.get_logger().info(f"Refresh completed: {len(self.worker_info)} workers active")
+            
+            # 👉 不再呼叫 self.refresh_all_workers()，因為不會刷新新 worker，只會複寫舊的
+            refreshed_count = len(self.worker_info)
+            all_models = self.list_models()
+
+            response.success = refreshed_count > 0
+            response.message = f"Controller has {refreshed_count} workers with models: {all_models}"
+            self.get_logger().info(f"Controller status: {response.message}")
         except Exception as e:
             self.get_logger().error(f"Error refreshing workers: {e}")
             response.success = False
@@ -275,36 +286,49 @@ class ControllerNode(Node):
     def refresh_all_workers(self):
         """刷新所有 Worker 資訊"""
         old_info = dict(self.worker_info)
-        self.worker_info = {}
-
         refreshed_count = 0
+
         for w_name, w_info in old_info.items():
+            # 不要先清空 worker_info
+            # 嘗試從原始記憶體中重新註冊
             if self.register_worker(w_name, w_info.check_heart_beat, None):
                 refreshed_count += 1
             else:
                 self.get_logger().info(f"Remove stale worker: {w_name}")
-                # 清理 service client
+                # 清理失效 worker
                 if w_name in self.worker_clients:
                     try:
                         self.worker_clients[w_name].destroy()
                         del self.worker_clients[w_name]
                     except:
                         pass
+                if w_name in self.worker_info:
+                    del self.worker_info[w_name]
 
         self.get_logger().info(f"Refresh completed: {refreshed_count}/{len(old_info)} workers active")
+        for w_name, w_info in self.worker_info.items():
+            self.get_logger().info(f"[DEBUG] Worker={w_name}, models={w_info.model_names}")
 
     def list_models_callback(self, request, response):
         """處理來自 RoboPointNode 的模型列表請求"""
+        self.get_logger().info(">>> [list_models_callback] triggered")
         try:
             models = self.list_models()
+            worker_ids = list(self.worker_info.keys())  # 獲取所有 worker IDs
+            
             response.success = True
             response.model_names = models
+            response.worker_ids = worker_ids  # ← 修復：添加缺失的字段
             response.message = f"Found {len(models)} models"
+            
             self.get_logger().info(f"Returning model list: {models}")
+            self.get_logger().info(f"Available workers: {worker_ids}")
+            
         except Exception as e:
             self.get_logger().error(f"Error listing models: {e}")
             response.success = False
             response.model_names = []
+            response.worker_ids = []  # ← 修復：添加缺失的字段
             response.message = str(e)
         
         return response
@@ -313,6 +337,7 @@ class ControllerNode(Node):
         """獲取所有可用模型列表"""
         model_names = set()
         for w_name, w_info in self.worker_info.items():
+            self.get_logger().debug(f"[DEBUG] worker={w_name}, model_names={w_info.model_names}")
             model_names.update(w_info.model_names)
         
         model_list = list(model_names)
@@ -324,20 +349,35 @@ class ControllerNode(Node):
         try:
             self.get_logger().info(f"Received get_worker_address request for model: {request.model}")
             address = self.get_worker_address(request.model)
+            
             if address:
+                # 獲取該 worker 的模型列表
+                worker_models = []
+                if address in self.worker_info:
+                    worker_models = self.worker_info[address].model_names
+                
                 response.success = True
-                response.address = address
+                response.worker_id = address        # ← 修復：設置 worker_id 而不是 address
+                response.address = address          # ← 保持原有的 address 字段
+                response.model_names = worker_models # ← 修復：添加 worker 的模型列表
                 response.message = f"Found worker {address} for model {request.model}"
-                self.get_logger().info(f"Returning worker address: {address} for model {request.model}")
+                
+                self.get_logger().info(f"Returning worker: id={address}, models={worker_models}")
             else:
                 response.success = False
+                response.worker_id = ""             # ← 修復：設置空的 worker_id
                 response.address = ""
+                response.model_names = []           # ← 修復：設置空的模型列表
                 response.message = f"No worker available for model: {request.model}"
+                
                 self.get_logger().warn(f"No worker found for model: {request.model}")
+                
         except Exception as e:
             self.get_logger().error(f"Error getting worker address: {e}")
             response.success = False
+            response.worker_id = ""                 # ← 修復：設置空的 worker_id
             response.address = ""
+            response.model_names = []               # ← 修復：設置空的模型列表
             response.message = str(e)
         
         return response
