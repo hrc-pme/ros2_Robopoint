@@ -8,10 +8,10 @@ HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN:-"your_token_here"}
 DISPLAY_TO_USE=${DISPLAY:-":0"}
 XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}
 
-# ⛑️ 檢查 XAUTHORITY 是否存在
+# 檢查 XAUTHORITY 是否存在
 if [ ! -f "$XAUTHORITY" ]; then
-  echo "❌ 找不到 XAUTHORITY 檔案：$XAUTHORITY"
-  echo "👉 請確認你是透過 MobaXterm SSH 登入，並啟用 X11 forwarding"
+  echo "找不到 XAUTHORITY 檔案：$XAUTHORITY"
+  echo "請確認你是透過 MobaXterm SSH 登入，並啟用 X11 forwarding"
   exit 1
 fi
 
@@ -30,26 +30,48 @@ fi
 
 start_interactive_session() {
   docker exec -e DISPLAY=$DISPLAY_TO_USE -e XAUTHORITY=/root/.Xauthority -u root -it $CONTAINER_NAME bash -ic '
-    CHOICE=$(whiptail --title "ROS 2 啟動選單 🤖" --menu "請選擇任務：" 18 70 10 \
-      "vision" "執行 fruit_vision_node" \
-      "bridge" "啟動 rosbridge websocket" \
-      "ros2_ws" "進入 ros2_ws" \
-      "skip" "不執行任何操作" 3>&1 1>&2 2>&3)
+    CHOICE=$(whiptail --title "ROS 2 Launch Menu" --menu "Please select a task:" 18 70 10 \
+      "Controller" "starts the worker manager" \
+      "Worker" "loads a model and connects to the controller" \
+      "Client" "sends queries and publishes results" \
+      "GUI" "sends queries and displaying results" \
+      "ros2_ws" "Enter ros2_ws workspace" \
+      "skip" "Skip all tasks and enter the container" 3>&1 1>&2 2>&3)
 
     case "$CHOICE" in
-      vision)
+      Controller)
         cd ros2_ws/
+        source /opt/ros/humble/setup.bash
+        colcon build --merge-install
         source install/local_setup.bash
-        colcon build --packages-select fruit_vision_voice --merge-install
-        ros2 run fruit_vision_voice fruit_vision_node6
+        ros2 launch robopoint_controller controller.launch.py
         ;;
-      bridge)
+      Worker)
         cd ros2_ws/
+        source /opt/ros/humble/setup.bash
+        colcon build --merge-install
         source install/local_setup.bash
-        ros2 launch rosbridge_server rosbridge_websocket_launch.xml
+        ros2 launch robopoint_worker model_worker.launch.py model_path:=wentao-yuan/robopoint-v1-vicuna-v1.5-13b
+        ;;
+      Client)
+        cd ros2_ws/
+        source /opt/ros/humble/setup.bash
+        colcon build --merge-install
+        source install/local_setup.bash
+        ros2 launch robopoint_ros2 robopoint_launch.py
+        ;;
+      GUI)
+        cd ros2_ws/
+        source /opt/ros/humble/setup.bash
+        colcon build --merge-install
+        source install/local_setup.bash
+        ros2 run robopoint_gui robopoint_gui_node
         ;;
       ros2_ws)
         cd ros2_ws/
+        source /opt/ros/humble/setup.bash
+        colcon build --merge-install
+        source install/local_setup.bash
         exec bash
         ;;
       skip)
@@ -61,10 +83,10 @@ start_interactive_session() {
 
 if [ "$(docker ps -aq -f name=^/${CONTAINER_NAME}$)" ]; then
   if [ "$(docker ps -q -f status=running -f name=^/${CONTAINER_NAME}$)" ]; then
-    echo "🟢 Container is already running. Attaching..."
+    echo "Container is already running. Attaching..."
     start_interactive_session
   else
-    echo "🟡 Starting existing container..."
+    echo "Starting existing container..."
     docker start $CONTAINER_NAME > /dev/null
     sleep 1
     start_interactive_session
