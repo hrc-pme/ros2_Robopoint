@@ -35,7 +35,7 @@ start_interactive_session() {
       "Worker" "loads a model and connects to the controller" \
       "Client" "sends queries and publishes results" \
       "GUI" "sends queries and displaying results" \
-      "Stretch Bridge" "converts RoboPoint affordance results into goal points for Stretch" \
+      "Stretch" "Maps RoboPoint points to Stretch goals" \
       "ros2_ws" "Enter ros2_ws workspace" \
       "skip" "Skip all tasks and enter the container" 3>&1 1>&2 2>&3)
 
@@ -68,7 +68,7 @@ start_interactive_session() {
         source install/local_setup.bash
         ros2 run robopoint_gui robopoint_gui_node
         ;;
-      Stretch Bridge)
+      Stretch_Bridge)
         cd ros2_ws/
         source /opt/ros/humble/setup.bash
         colcon build --merge-install
