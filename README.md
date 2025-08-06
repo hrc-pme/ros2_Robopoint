@@ -76,6 +76,13 @@ source install/local_setup.bash
    ros2 run robopoint_gui robopoint_gui_node
    ```
 
+5. **Stretch Bridge** – converts RoboPoint affordance results into goal points for Stretch:
+
+   ```bash
+   ros2 run robopoint_stretch_bridge stretch_bridge
+   ```
+   This node listens to affordance outputs from robopoint_node, extracts the highest-confidence point, projects it into 3D using depth data and camera intrinsics, and publishes a geometry_msgs/PointStamped goal for Stretch to act upon.
+   
 ## Repository layout
 
 ```

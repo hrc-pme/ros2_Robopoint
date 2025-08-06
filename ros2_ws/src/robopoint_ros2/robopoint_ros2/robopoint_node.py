@@ -587,33 +587,48 @@ class RoboPointNode(Node):
         return vectors
 
     def create_visualization(self, pil_image, affordance_points, cross_size=9, cross_width=4):
-        """Create visualization of affordance points on image"""
+        """Create visualization of affordance points on image, highlighting the highest-confidence point."""
         try:
             if not affordance_points:
                 return None
-                
+
             # Convert PIL to OpenCV
             cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
             h, w = cv_image.shape[:2]
-            
-            # Draw points
-            for point in affordance_points:
-                # Convert normalized coordinates to pixel coordinates
-                x = int(point.x * w) if point.x <= 1.0 else int(point.x)
-                y = int(point.y * h) if point.y <= 1.0 else int(point.y)
-                
-                # Draw cross
-                cv2.line(cv_image, 
-                        (x - cross_size, y - cross_size), 
-                        (x + cross_size, y + cross_size), 
-                        (0, 0, 255), cross_width)
-                cv2.line(cv_image, 
-                        (x - cross_size, y + cross_size), 
-                        (x + cross_size, y - cross_size), 
-                        (0, 0, 255), cross_width)
-            
+
+            # 找出最高信心點
+            best_pt = max(affordance_points, key=lambda p: p.confidence)
+
+            for pt in affordance_points:
+                # Normalize → pixel
+                x = int(pt.x * w) if pt.x <= 1.0 else int(pt.x)
+                y = int(pt.y * h) if pt.y <= 1.0 else int(pt.y)
+
+                # 最佳點用綠色、放大；其餘用紅色
+                if pt is best_pt:
+                    color = (0, 255, 0)
+                    size  = int(cross_size * 1.5)
+                    width = int(cross_width * 1.5)
+                else:
+                    color = (0, 0, 255)
+                    size  = cross_size
+                    width = cross_width
+
+                # 畫十字
+                cv2.line(cv_image, (x - size, y - size), (x + size, y + size), color, width)
+                cv2.line(cv_image, (x - size, y + size), (x + size, y - size), color, width)
+
+                # 在點旁顯示 confidence
+                cv2.putText(
+                    cv_image,
+                    f"{pt.confidence:.2f}",
+                    (x + size + 2, y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, color, 1
+                )
+
             return cv_image
-            
+
         except Exception as e:
             self.get_logger().error(f"Error creating visualization: {e}")
             return None
